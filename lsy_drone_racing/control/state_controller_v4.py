@@ -1,12 +1,4 @@
-"""State controller that follows an adaptive, faster spline trajectory.
 
-This version improves the baseline controller by:
-1. Retiming the trajectory based on waypoint distances.
-2. Providing desired position, velocity, acceleration, yaw, and yaw-rate.
-3. Updating gate waypoints from observed gate positions.
-4. Shifting non-gate waypoints away from obstacles.
-5. Avoiding cumulative waypoint drift by always recomputing from a clean base path.
-"""
 
 from __future__ import annotations
 
@@ -36,24 +28,24 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------
 
 # Higher = faster trajectory. If the drone starts missing gates, reduce this.
-TARGET_SPEED_MPS = 4.5
+TARGET_SPEED_MPS = 1.35
 
 # Hard upper bound used when retiming the spline.
 # The controller stretches the trajectory if the spline exceeds this.
-MAX_SPEED_MPS = 5.0
+MAX_SPEED_MPS = 1.90
 
 # Hard acceleration limit used when retiming the spline.
 # If the spline asks for too much acceleration, the trajectory is slowed down.
-MAX_ACCEL_MPS2 = 7.0
+MAX_ACCEL_MPS2 = 5.0
 
 # Prevents very short waypoint segments from becoming too aggressive.
 MIN_SEGMENT_TIME = 0.20
 
 # Number of samples used to estimate max speed and acceleration during retiming.
-RETIMING_SAMPLES = 400
+RETIMING_SAMPLES = 160
 
 # Number of retiming iterations.
-RETIMING_ITERS = 12
+RETIMING_ITERS = 4
 
 
 # ---------------------------------------------------------------------
@@ -62,16 +54,17 @@ RETIMING_ITERS = 12
 
 NOMINAL_GATE_POS = np.array(
     [
-        [0.5, 0.25, 0.7],
         [1.05, 0.75, 1.2],
-        [-1.0, -0.25, 0.7],
+        [0.5, 0.25, 0.7],
         [0.0, -0.75, 1.2],
+        [-1.0, -0.25, 0.7],
+
     ],
     dtype=np.float64,
 )
 
 # Waypoint index corresponding to each gate center.
-GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 11}
+GATE_WAYPOINT_IDX = {1: 2, 0: 5, 3: 8, 2: 13}
 
 # Fly slightly lower than the detected gate center.
 # Set this to 0.0 if you want to aim exactly at the center.
@@ -102,21 +95,24 @@ YAW_MIN_SPEED = 0.05
 
 NOMINAL_WAYPOINTS = np.array(
     [
-        [-1.5, 0.75, 0.05],  # 0 start
-        [-1.0, 0.55, 0.40],  # 1
-        [0.0, 0.45, 0.70],  # 2 approach gate 0
-        [0.5, 0.25, 0.70],  # 3 gate 0 center
-        [1.3, -0.15, 0.90],  # 4 approach gate 1
-        [1.05, 0.75, 1.20],  # 5 gate 1 center
-        [0.65, 1.0, 1.20],  # 6
-        [-0.2, -0.05, 0.60],  # 7
-        [-0.6, -0.2, 0.60],  # 8 approach gate 2
-        [-1.0, -0.25, 0.70],  # 9 gate 2 center
 
-        [-0.5, -0.65, 1.0],  # 13
+            [-1.5, 0.75, 0.05],
+            [ 0.65, 1.0, 1.2 ],  # 6
+            [ 1.05, 0.75, 1.2 ], # 5 ← gate 1 center
+            [ 1.3, -0.15, 0.9 ],  # 4 approach gate 1
 
-        [0.0, -0.75, 1.20],  # 15 gate 3 center
-        [0.5, -0.75, 1.20],  # 16 end
+            [ 0.5,  0.25, 0.7 ],  # 3 ← gate 0 center
+            [ 0.0,  0.45, 0.7 ],  # 2 approach gate 0
+
+            [ 0.5, -0.75, 1.2 ],  # 13 end
+            [ 0.0, -0.75, 1.2 ],  # 12 ← gate 3 center
+            [-0.2, -0.65,  1.2 ],
+            [-0.5, -0.65,  1.2 ],
+
+            [-0.2, -0.05, 0.6 ],  # 7
+            [-0.6, -0.2,  0.6 ],  # 8 approach gate 2
+            [-1.0, -0.25, 0.7 ],  # 9 ← gate 2 center
+            [-1.5, -0.4, 0.7 ], #10
     ],
     dtype=np.float64,
 )
