@@ -79,7 +79,7 @@ class StateController(Controller):
 
 
 
-        self._t_total = 15.0
+        self._t_total = 10.0
         self._tick = 0
         self._finished = False
         self._rebuild_spline()
