@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.interpolate import CubicSpline
+from scipy.interpolate import PchipInterpolator
 
 from lsy_drone_racing.control.controller import Controller
 
@@ -75,7 +76,7 @@ GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 15}
 
 # Fly slightly lower than the detected gate center.
 # Set this to 0.0 if you want to aim exactly at the center.
-GATE_Z_OFFSET = -0.10
+GATE_Z_OFFSET = -0.1
 
 # Ignore very tiny gate shifts.
 GATE_UPDATE_EPS = 0.01
@@ -220,7 +221,7 @@ class StateController(Controller):
         # Retiming loop:
         # Build a spline, check its speed/acceleration, and stretch time if needed.
         for _ in range(RETIMING_ITERS):
-            spline = CubicSpline(t_knots, self._waypoints, bc_type="clamped")
+            spline = PchipInterpolator(t_knots, self._waypoints, axis=0)
 
             t_samples = np.linspace(t_knots[0], t_knots[-1], RETIMING_SAMPLES)
 
@@ -249,7 +250,7 @@ class StateController(Controller):
         self._t_knots = t_knots
         self._t_total = float(t_knots[-1])
 
-        self._spline = CubicSpline(self._t_knots, self._waypoints, bc_type="clamped")
+        self._spline = PchipInterpolator(self._t_knots, self._waypoints, axis=0)
         self._vel_spline = self._spline.derivative(1)
         self._acc_spline = self._spline.derivative(2)
 
