@@ -19,6 +19,7 @@ from lsy_drone_racing.control.controller import Controller
 
 try:
     from crazyflow.sim.visualize import draw_line, draw_points
+
     HAS_VIZ = True
 except ImportError:
     draw_line = None
@@ -27,12 +28,7 @@ except ImportError:
 
 
 NOMINAL_GATE_POS = np.array(
-    [
-        [0.50, 0.25, 0.70],
-        [1.05, 0.75, 1.20],
-        [-1.00, -0.25, 0.70],
-        [0.00, -0.75, 1.20],
-    ],
+    [[0.50, 0.25, 0.70], [1.05, 0.75, 1.20], [-1.00, -0.25, 0.70], [0.00, -0.75, 1.20]],
     dtype=np.float64,
 )
 
@@ -192,10 +188,7 @@ class StateController(Controller):
             self._wp_idx += 1
 
     def _local_target_toward(
-        self,
-        pos: np.ndarray,
-        target: np.ndarray,
-        lookahead: float,
+        self, pos: np.ndarray, target: np.ndarray, lookahead: float
     ) -> tuple[np.ndarray, np.ndarray, float]:
         """Return a nearby local setpoint toward the active waypoint."""
         delta = target - pos
@@ -263,9 +256,7 @@ class StateController(Controller):
                 active_wp = self._path[self._wp_idx]
 
                 target_pos, direction, dist_to_wp = self._local_target_toward(
-                    pos,
-                    active_wp,
-                    LOOKAHEAD_DIST,
+                    pos, active_wp, LOOKAHEAD_DIST
                 )
 
                 # Slow down near waypoints.
@@ -285,12 +276,7 @@ class StateController(Controller):
                 self._current_target = target_pos.copy()
 
         action = np.concatenate(
-            (
-                target_pos,
-                des_vel,
-                des_acc,
-                np.array([des_yaw, 0.0, 0.0, 0.0], dtype=np.float64),
-            )
+            (target_pos, des_vel, des_acc, np.array([des_yaw, 0.0, 0.0, 0.0], dtype=np.float64))
         ).astype(np.float32)
 
         return action
@@ -318,9 +304,4 @@ class StateController(Controller):
             return
 
         draw_line(sim, self._path, rgba=(0.0, 1.0, 0.0, 1.0))
-        draw_points(
-            sim,
-            self._current_target.reshape(1, -1),
-            rgba=(1.0, 0.0, 0.0, 1.0),
-            size=0.03,
-        )
+        draw_points(sim, self._current_target.reshape(1, -1), rgba=(1.0, 0.0, 0.0, 1.0), size=0.03)
