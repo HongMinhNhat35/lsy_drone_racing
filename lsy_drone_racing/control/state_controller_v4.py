@@ -484,9 +484,9 @@ class StateController(Controller):
         self._waypoints = self._gate_corrected_waypoints.copy()
 
         self._rebuild_spline()
-
+            
     def render_callback(self, sim: "Sim"):
-        """Visualize the remaining trajectory and current setpoint."""
+        """Visualize the remaining trajectory, current setpoint, and nominal waypoints."""
         if not HAS_VIZ:
             return
 
@@ -500,5 +500,11 @@ class StateController(Controller):
         trajectory = self._spline(t_vals)
         setpoint = self._spline(t_now).reshape(1, -1)
 
+        # Original trajectory visualization
         draw_line(sim, trajectory, rgba=(0.0, 1.0, 0.0, 1.0))
+
+        # Original current setpoint visualization
         draw_points(sim, setpoint, rgba=(1.0, 0.0, 0.0, 1.0), size=0.025)
+
+        # Added: fixed nominal waypoints visualization
+        draw_points(sim, NOMINAL_WAYPOINTS, rgba=(1.0, 0.5, 0.0, 1.0), size=0.04)
