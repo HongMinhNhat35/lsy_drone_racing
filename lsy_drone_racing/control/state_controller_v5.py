@@ -117,7 +117,7 @@ NOMINAL_WAYPOINTS = np.array(
         [-0.5, -0.45, 1.0],  # 13
 
         [0.0, -0.75, 1.20],  # 15 gate 3 center
-        [0.5, -0.75, 1.20],  # 16 end
+        [0.5, -0.75, 1.20],  # 16 end.
     ],
     dtype=np.float64,
 )
