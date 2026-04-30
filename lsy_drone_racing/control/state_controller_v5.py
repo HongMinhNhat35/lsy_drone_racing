@@ -6,6 +6,7 @@ This version improves the baseline controller by:
 3. Updating gate waypoints from observed gate positions.
 4. Shifting non-gate waypoints away from obstacles.
 5. Avoiding cumulative waypoint drift by always recomputing from a clean base path.
+6. Keeping higher speed through corners using corner-aware timing.
 """
 
 from __future__ import annotations
@@ -35,22 +36,31 @@ if TYPE_CHECKING:
 # Tunable trajectory parameters
 # ---------------------------------------------------------------------
 
+# Higher = faster trajectory.
+# If the drone starts missing gates or crashing, reduce this first.
 TARGET_SPEED_MPS = 5.8
+
+# Hard upper bound used when retiming the spline.
 MAX_SPEED_MPS = 7.0
+
+# Higher acceleration limit allows faster cornering.
+# If the drone oscillates or flips at turns, reduce this.
 MAX_ACCEL_MPS2 = 16.0
 
+# Prevents very short waypoint segments from becoming numerically aggressive.
 MIN_SEGMENT_TIME = 0.10
-
-# Extra corner aggression
-CORNER_FAST_ANGLE_DEG = 35.0
-CORNER_TIME_SCALE = 0.65
-CORNER_MIN_SEGMENT_TIME = 0.075
 
 # Number of samples used to estimate max speed and acceleration during retiming.
 RETIMING_SAMPLES = 400
 
 # Number of retiming iterations.
 RETIMING_ITERS = 15
+
+# Corner timing parameters.
+# Smaller CORNER_TIME_SCALE means faster through corners.
+CORNER_FAST_ANGLE_DEG = 35.0
+CORNER_TIME_SCALE = 0.65
+CORNER_MIN_SEGMENT_TIME = 0.075
 
 
 # ---------------------------------------------------------------------
@@ -78,7 +88,6 @@ GATE_Z_OFFSET = -0.10
 GATE_UPDATE_EPS = 0.01
 
 # Obstacle clearance radius in x-y plane.
-# Actual obstacles may be smaller, but this creates a safety buffer.
 OBSTACLE_CLEARANCE_RADIUS = 0.32
 
 # Do not keep modifying waypoints that are already in the past.
@@ -99,21 +108,19 @@ YAW_MIN_SPEED = 0.05
 
 NOMINAL_WAYPOINTS = np.array(
     [
-        [-1.5, 0.75, 0.05],  # 0 start
-        [-1.0, 0.55, 0.40],  # 1
-        [0.0, 0.25, 0.70],  # 2 approach gate 0
-        [0.55, 0.20, 0.70],  # 3 gate 0 center
-        [1.5, 0.20, 0.90],  # 4 approach gate 1
-        [1.1, 0.78, 1.20],  # 5 gate 1 center
-        [0.50, 0.75, 1.20],  # 6
+        [-1.5, 0.75, 0.05],   # 0 start
+        [-1.0, 0.55, 0.40],   # 1
+        [0.0, 0.25, 0.70],    # 2 approach gate 0
+        [0.55, 0.20, 0.70],   # 3 gate 0 center
+        [1.5, 0.20, 0.90],    # 4 approach gate 1
+        [1.1, 0.78, 1.20],    # 5 gate 1 center
+        [0.50, 0.75, 1.20],   # 6
         [-0.2, -0.05, 0.60],  # 7
-        [-0.6, -0.2, 0.60],  # 8 approach gate 2
-        [-1.0, -0.25, 0.70],   # 9 gate 2 center
-
-        [-0.5, -0.45, 1.0],  # 13
-
-        [0.0, -0.75, 1.20],  # 15 gate 3 center
-        [0.5, -0.75, 1.20],  # 16 end
+        [-0.6, -0.2, 0.60],   # 8 approach gate 2
+        [-1.0, -0.25, 0.70],  # 9 gate 2 center
+        [-0.5, -0.45, 1.0],   # 10 approach gate 3
+        [0.0, -0.75, 1.20],   # 11 gate 3 center
+        [0.5, -0.75, 1.20],   # 12 end
     ],
     dtype=np.float64,
 )
@@ -123,35 +130,26 @@ class StateController(Controller):
     """Adaptive state controller following a retimed cubic spline trajectory."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
-        """Initialize the controller.
-
-        Args:
-            obs: Initial environment observation.
-            info: Initial environment info.
-            config: Race/environment configuration.
-        """
+        """Initialize the controller."""
         super().__init__(obs, info, config)
 
         self._freq = config.env.freq
 
-        # This is the clean nominal path.
-        # It never accumulates obstacle shifts.
+        # Clean nominal path. Never accumulates obstacle shifts.
         self._nominal_waypoints = NOMINAL_WAYPOINTS.copy()
 
-        # This version includes gate corrections, but not obstacle shifts.
+        # Includes gate corrections, but not obstacle shifts.
         self._gate_corrected_waypoints = self._nominal_waypoints.copy()
 
-        # This is the final active path after gate correction and obstacle avoidance.
+        # Final active path after gate correction and obstacle avoidance.
         self._waypoints = self._gate_corrected_waypoints.copy()
 
-        # Tracks whether a gate has already been updated from observed pose.
         self._gate_updated = [False] * len(NOMINAL_GATE_POS)
 
         self._tick = 0
         self._finished = False
         self._last_yaw = 0.0
 
-        # Build initial trajectory.
         self._rebuild_spline()
 
     # ------------------------------------------------------------------
@@ -165,10 +163,7 @@ class StateController(Controller):
 
     @staticmethod
     def _closest_angle(angle: float, reference: float) -> float:
-        """Return angle equivalent to angle but closest to reference.
-
-        This avoids sudden jumps from +pi to -pi.
-        """
+        """Return angle equivalent to angle but closest to reference."""
         return float(reference + ((angle - reference + np.pi) % (2.0 * np.pi) - np.pi))
 
     def _elapsed_time(self) -> float:
@@ -187,7 +182,12 @@ class StateController(Controller):
     # ------------------------------------------------------------------
 
     def _make_time_knots(self, waypoints: NDArray[np.floating]) -> NDArray[np.floating]:
-    
+        """Assign timestamps to waypoints based on distance and corner sharpness.
+
+        Base timing is distance / target speed. Around sharp turns, the incoming
+        and outgoing segment times are reduced so the drone carries more speed
+        through the corner.
+        """
         segment_vectors = np.diff(waypoints, axis=0)
         segment_lengths = np.linalg.norm(segment_vectors, axis=1)
 
@@ -211,11 +211,10 @@ class StateController(Controller):
             cos_angle = np.dot(v_prev, v_next) / (n_prev * n_next)
             cos_angle = np.clip(cos_angle, -1.0, 1.0)
 
-            # 0 = straight, larger = sharper turn
+            # 0 means straight. Larger means sharper turn.
             turn_angle = np.arccos(cos_angle)
 
             if turn_angle > corner_angle_threshold:
-                # Speed up both the segment entering and leaving the corner.
                 segment_times[i - 1] = max(
                     segment_times[i - 1] * CORNER_TIME_SCALE,
                     CORNER_MIN_SEGMENT_TIME,
@@ -225,16 +224,61 @@ class StateController(Controller):
                     CORNER_MIN_SEGMENT_TIME,
                 )
 
-        return np.concatenate(([0.0], np.cumsum(segment_times)))
+        t_knots = np.concatenate(([0.0], np.cumsum(segment_times)))
+
+        return t_knots
+
+    def _rebuild_spline(self):
+        """Rebuild the position, velocity, and acceleration splines."""
+        if not np.all(np.isfinite(self._waypoints)):
+            raise ValueError(f"Waypoints contain NaN or inf:\n{self._waypoints}")
+
+        t_knots = self._make_time_knots(self._waypoints)
+
+        if not np.all(np.isfinite(t_knots)):
+            raise ValueError(f"Time knots contain NaN or inf:\n{t_knots}")
+
+        if np.any(np.diff(t_knots) <= 0.0):
+            raise ValueError(f"Time knots are not strictly increasing:\n{t_knots}")
+
+        for _ in range(RETIMING_ITERS):
+            spline = CubicSpline(t_knots, self._waypoints, bc_type="clamped")
+
+            t_samples = np.linspace(t_knots[0], t_knots[-1], RETIMING_SAMPLES)
+
+            vel = spline.derivative(1)(t_samples)
+            acc = spline.derivative(2)(t_samples)
+
+            max_speed = float(np.max(np.linalg.norm(vel, axis=1)))
+            max_accel = float(np.max(np.linalg.norm(acc, axis=1)))
+
+            speed_scale = max_speed / MAX_SPEED_MPS if max_speed > MAX_SPEED_MPS else 1.0
+            accel_scale = (
+                np.sqrt(max_accel / MAX_ACCEL_MPS2)
+                if max_accel > MAX_ACCEL_MPS2
+                else 1.0
+            )
+
+            scale = max(speed_scale, accel_scale)
+
+            if scale <= 1.001:
+                break
+
+            t_knots = t_knots * (scale * 1.02)
+
+        self._t_knots = t_knots
+        self._t_total = float(t_knots[-1])
+
+        self._spline = CubicSpline(self._t_knots, self._waypoints, bc_type="clamped")
+        self._vel_spline = self._spline.derivative(1)
+        self._acc_spline = self._spline.derivative(2)
+
     # ------------------------------------------------------------------
     # Gate correction
     # ------------------------------------------------------------------
 
     def _update_gate_waypoints(self, obs: dict) -> bool:
-        """Update gate-center waypoints using observed gate positions.
-
-        This makes the path more accurate when gates are randomized.
-        """
+        """Update gate-center waypoints using observed gate positions."""
         if "gates_pos" not in obs:
             return False
 
@@ -247,7 +291,6 @@ class StateController(Controller):
         changed = False
 
         for gate_i, wp_i in GATE_WAYPOINT_IDX.items():
-            # Do not change a gate waypoint after it has already been passed.
             if self._is_waypoint_past(wp_i, t_now):
                 continue
 
@@ -256,7 +299,6 @@ class StateController(Controller):
             if not np.all(np.isfinite(observed_pos)):
                 continue
 
-            # Aim slightly below the observed gate center.
             observed_pos[2] += GATE_Z_OFFSET
 
             current_target = self._gate_corrected_waypoints[wp_i]
@@ -278,12 +320,7 @@ class StateController(Controller):
         waypoint: NDArray[np.floating],
         obs_positions: NDArray[np.floating],
     ) -> NDArray[np.floating]:
-        """Push one waypoint away from obstacles in the x-y plane.
-
-        This is intentionally simple. It does not run a full planner.
-        It only makes sure the spline control points do not sit too close
-        to obstacle centers.
-        """
+        """Push one waypoint away from obstacles in the x-y plane."""
         shifted = waypoint.copy()
 
         for obs_pos in obs_positions:
@@ -295,7 +332,6 @@ class StateController(Controller):
 
             if dist_xy < OBSTACLE_CLEARANCE_RADIUS:
                 if dist_xy < 1e-6:
-                    # If exactly on the obstacle, push in a fixed direction.
                     direction = np.array([1.0, 0.0])
                 else:
                     direction = delta_xy / dist_xy
@@ -305,12 +341,7 @@ class StateController(Controller):
         return shifted
 
     def _update_obstacle_avoidance(self, obs: dict) -> bool:
-        """Recompute obstacle-safe waypoints without cumulative drift.
-
-        Important:
-        This starts from gate-corrected waypoints every time.
-        It does not keep shifting already-shifted waypoints farther and farther.
-        """
+        """Recompute obstacle-safe waypoints without cumulative drift."""
         if "obstacles_pos" not in obs:
             return False
 
@@ -322,15 +353,14 @@ class StateController(Controller):
         obs_positions = obs_positions.reshape(-1, 3)
 
         t_now = self._elapsed_time()
-
         candidate_waypoints = self._gate_corrected_waypoints.copy()
 
+        gate_waypoint_indices = set(GATE_WAYPOINT_IDX.values())
+
         for wp_i in range(len(candidate_waypoints)):
-            # Keep gate centers fixed. We want to pass through gates accurately.
-            if wp_i in GATE_WAYPOINT_IDX.values():
+            if wp_i in gate_waypoint_indices:
                 continue
 
-            # Avoid changing waypoints that have already been passed.
             if self._is_waypoint_past(wp_i, t_now):
                 candidate_waypoints[wp_i] = self._waypoints[wp_i]
                 continue
@@ -363,10 +393,7 @@ class StateController(Controller):
         des_vel: NDArray[np.floating],
         des_acc: NDArray[np.floating],
     ) -> tuple[float, float]:
-        """Compute desired yaw and yaw-rate from trajectory direction.
-
-        The drone points along the x-y velocity direction.
-        """
+        """Compute desired yaw and yaw-rate from trajectory direction."""
         vx, vy = float(des_vel[0]), float(des_vel[1])
         ax, ay = float(des_acc[0]), float(des_acc[1])
 
@@ -376,11 +403,8 @@ class StateController(Controller):
             return self._wrap_to_pi(self._last_yaw), 0.0
 
         raw_yaw = float(np.arctan2(vy, vx))
-
-        # Pick the equivalent yaw angle closest to the previous yaw.
         continuous_yaw = self._closest_angle(raw_yaw, self._last_yaw)
 
-        # d/dt atan2(vy, vx)
         yaw_rate = (vx * ay - vy * ax) / speed_xy_sq
 
         self._last_yaw = continuous_yaw
@@ -405,7 +429,6 @@ class StateController(Controller):
              yaw,
              rrate, prate, yrate]
         """
-        # Update path before computing the desired state.
         self._update_path_from_observation(obs)
 
         t = self._elapsed_time()
@@ -419,8 +442,6 @@ class StateController(Controller):
 
         des_yaw, des_yaw_rate = self._compute_yaw_and_rate(des_vel, des_acc)
 
-        # Roll-rate and pitch-rate are left as zero.
-        # Yaw-rate is provided as feed-forward.
         action = np.concatenate(
             (
                 des_pos,
@@ -428,9 +449,8 @@ class StateController(Controller):
                 des_acc,
                 np.array([des_yaw]),
                 np.array([0.0, 0.0, des_yaw_rate]),
-            ),
-            dtype=np.float32,
-        )
+            )
+        ).astype(np.float32)
 
         return action
 
@@ -459,7 +479,7 @@ class StateController(Controller):
         self._waypoints = self._gate_corrected_waypoints.copy()
 
         self._rebuild_spline()
-            
+
     def render_callback(self, sim: "Sim"):
         """Visualize the remaining trajectory, current setpoint, and nominal waypoints."""
         if not HAS_VIZ:
@@ -475,11 +495,11 @@ class StateController(Controller):
         trajectory = self._spline(t_vals)
         setpoint = self._spline(t_now).reshape(1, -1)
 
-        # Original trajectory visualization
+        # Remaining active trajectory.
         draw_line(sim, trajectory, rgba=(0.0, 1.0, 0.0, 1.0))
 
-        # Original current setpoint visualization
+        # Current setpoint.
         draw_points(sim, setpoint, rgba=(1.0, 0.0, 0.0, 1.0), size=0.025)
 
-        # Added: fixed nominal waypoints visualization
+        # Fixed nominal waypoints.
         draw_points(sim, NOMINAL_WAYPOINTS, rgba=(1.0, 0.5, 0.0, 1.0), size=0.04)
