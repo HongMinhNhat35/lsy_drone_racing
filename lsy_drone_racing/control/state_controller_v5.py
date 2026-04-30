@@ -40,7 +40,7 @@ TARGET_SPEED_MPS = 4.5
 
 # Hard upper bound used when retiming the spline.
 # The controller stretches the trajectory if the spline exceeds this.
-MAX_SPEED_MPS = 5.0
+MAX_SPEED_MPS = 6.0
 
 # Hard acceleration limit used when retiming the spline.
 # If the spline asks for too much acceleration, the trajectory is slowed down.
