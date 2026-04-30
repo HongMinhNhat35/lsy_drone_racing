@@ -51,27 +51,32 @@ class AttitudeRL(Controller):
         # Set trajectory parameters
         self.n_samples = 10
         self.samples_dt = 0.1
-        self.trajectory_time = 15.0
+        self.trajectory_time = 7
         self.sample_offsets = np.array(
             np.arange(self.n_samples) * self.freq * self.samples_dt, dtype=int
         )
         self._tick = 0
 
         # Same waypoints as in the trajectory controller. Determined by trial and error.
-        waypoints = np.array(
-            [
-                [-1.5, 0.75, 0.05],
-                [-1.0, 0.55, 0.4],
-                [0.3, 0.35, 0.7],
-                [1.3, -0.15, 0.9],
-                [0.85, 0.85, 1.2],
-                [-0.5, -0.05, 0.7],
-                [-1.2, -0.2, 0.8],
-                [-1.2, -0.2, 1.2],
-                [-0.0, -0.7, 1.2],
-                [0.5, -0.75, 1.2],
-            ]
-        )
+        waypoints = np.array([
+            [-1.5,  0.75, 0.05],  # 0 start
+            [-1.0,  0.55, 0.4 ],  # 1
+            [ 0.0,  0.45, 0.7 ],  # 2 approach gate 0
+            [ 0.5,  0.25, 0.7 ],  # 3 ← gate 0 center
+            [ 1.3, -0.15, 0.9 ],  # 4 approach gate 1
+            [ 1.05, 0.75, 1.2 ],  # 5 ← gate 1 center
+            [ 0.65, 1.0, 1.2 ],  # 6
+            [-0.2, -0.05, 0.6 ],  # 7
+            [-0.6, -0.2,  0.6 ],  # 8 approach gate 2
+            [-1.0, -0.25, 0.7 ],  # 9 ← gate 2 center
+            [-1.5, -0.4, 0.7 ], #10
+            [-1.5, -0.5,  1.2 ],  # 11
+            [-1.0, -0.7,  1.2 ],  # 12 approach gate 3
+            [-0.5, -0.65,  1.2 ],
+            [-0.2, -0.65,  1.2 ],
+            [ 0.0, -0.75, 1.2 ],  # 12 ← gate 3 center
+            [ 0.5, -0.75, 1.2 ],  # 13 end
+        ])
         # Generate spline trajectory
         ts = np.linspace(0, self.trajectory_time, int(self.freq * self.trajectory_time))
         spline = CubicSpline(np.linspace(0, self.trajectory_time, waypoints.shape[0]), waypoints)
