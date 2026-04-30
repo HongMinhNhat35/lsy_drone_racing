@@ -22,7 +22,7 @@ classifiers = [
 ########################
 # Pip Dependencies
 ########################
-dependencies = ["fire >= 0.6.0", "numpy", "toml >= 0.10.2"]
+dependencies = ["fire >= 0.6.0", "numpy", "toml >= 0.10.2", "torch==2.8.0"]
 
 [project.optional-dependencies]
 # option[sim]: basic simulation
@@ -73,6 +73,7 @@ cmake = "*"
 compilers = ">=1.9.0, <1.11.0"
 make = "*"
 openblas = ">=0.3.30,<0.4"
+wandb = ">=0.26.1,<0.27"
 
 [tool.pixi.pypi-dependencies]
 lsy_drone_racing = { path = ".", editable = true }

@@ -58,25 +58,28 @@ class AttitudeRL(Controller):
         self._tick = 0
 
         # Same waypoints as in the trajectory controller. Determined by trial and error.
-        waypoints = np.array([
-            [-1.5,  0.75, 0.05],  # 0 start
-            [-1.0,  0.55, 0.4 ],  # 1
-            [ 0.0,  0.45, 0.7 ],  # 2 approach gate 0
-            [ 0.5,  0.25, 0.7 ],  # 3 ← gate 0 center
-            [ 1.3, -0.15, 0.9 ],  # 4 approach gate 1
-            [ 1.05, 0.75, 1.2 ],  # 5 ← gate 1 center
-            [ 0.65, 1.0, 1.2 ],  # 6
-            [-0.2, -0.05, 0.6 ],  # 7
-            [-0.6, -0.2,  0.6 ],  # 8 approach gate 2
-            [-1.0, -0.25, 0.7 ],  # 9 ← gate 2 center
-            [-1.5, -0.4, 0.7 ], #10
-            [-1.5, -0.5,  1.2 ],  # 11
-            [-1.0, -0.7,  1.2 ],  # 12 approach gate 3
-            [-0.5, -0.65,  1.2 ],
-            [-0.2, -0.65,  1.2 ],
-            [ 0.0, -0.75, 1.2 ],  # 12 ← gate 3 center
-            [ 0.5, -0.75, 1.2 ],  # 13 end
-        ])
+            
+        waypoints = np.array(
+            [
+                [-1.5, 0.75, 0.05],  # 0 start
+                [-1.0, 0.55, 0.40],  # 1
+                [0.0, 0.45, 0.70],  # 2 approach gate 0
+                [0.5, 0.25, 0.70],  # 3 gate 0 center
+                [1.3, -0.15, 0.90],  # 4 approach gate 1
+                [1.05, 0.75, 1.20],  # 5 gate 1 center
+                [0.65, 0.75, 1.20],  # 6
+                [-0.2, -0.05, 0.60],  # 7
+                [-0.6, -0.2, 0.60],  # 8 approach gate 2
+                [-1.0, -0.25, 0.70],  # 9 gate 2 center
+
+                [-0.5, -0.35, 1.0],  # 13
+
+                [0.0, -0.75, 1.20],  # 15 gate 3 center
+                [0.5, -0.75, 1.20],  # 16 end
+            ],
+            dtype=np.float64,
+        )
+
         # Generate spline trajectory
         ts = np.linspace(0, self.trajectory_time, int(self.freq * self.trajectory_time))
         spline = CubicSpline(np.linspace(0, self.trajectory_time, waypoints.shape[0]), waypoints)
@@ -112,15 +115,25 @@ class AttitudeRL(Controller):
 
         obs_rl = self._obs_rl(obs)
         obs_rl = torch.tensor(obs_rl, dtype=torch.float32).unsqueeze(0).to("cpu")
+
         with torch.no_grad():
             act, _, _, _ = self.agent.get_action_and_value(obs_rl, deterministic=True)
-            self.last_action = np.asarray(torch.asarray(act.squeeze(0))).copy()
+
+            # Disable yaw command
             act[..., 2] = 0.0
 
-        act = self._scale_actions(act.squeeze(0).numpy()).astype(np.float32)
+            self.last_action = act.squeeze(0).cpu().numpy().copy()
 
-        return act
+        act = self._scale_actions(act.squeeze(0).cpu().numpy()).astype(np.float32)
 
+        # _scale_actions returns [roll, pitch, yaw, thrust]
+        roll_des = act[0]
+        pitch_des = act[1]
+        yaw_des = act[2]
+        thrust_des = act[3]
+
+        # Simulator expects [thrust, roll, pitch, yaw]
+        return np.array([thrust_des, roll_des, pitch_des, yaw_des], dtype=np.float32)
     def _obs_rl(self, obs: dict[str, NDArray[np.floating]]) -> NDArray[np.floating]:
         """Extract the relevant parts of the observation for the RL policy."""
         obs_rl = {}
