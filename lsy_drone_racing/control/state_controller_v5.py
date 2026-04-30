@@ -44,7 +44,7 @@ MAX_SPEED_MPS = 6.0
 
 # Hard acceleration limit used when retiming the spline.
 # If the spline asks for too much acceleration, the trajectory is slowed down.
-MAX_ACCEL_MPS2 = 7.0
+MAX_ACCEL_MPS2 = 8.0
 
 # Prevents very short waypoint segments from becoming too aggressive.
 MIN_SEGMENT_TIME = 0.20
