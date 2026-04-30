@@ -1,11 +1,11 @@
-"""State controller with original spline path plus virtual-time lag governor.
+"""State controller that follows an adaptive, faster spline trajectory.
 
-Emergency Try 2:
-- Restores the original state_controller_v2 structure.
-- Keeps the 13D state action interface.
-- Keeps the original waypoint path and gate z-offset.
-- Adds a virtual time variable so the trajectory slows down if the drone falls behind.
-- Does not use the failed polyline controller.
+This version improves the baseline controller by:
+1. Retiming the trajectory based on waypoint distances.
+2. Providing desired position, velocity, acceleration, yaw, and yaw-rate.
+3. Updating gate waypoints from observed gate positions.
+4. Shifting non-gate waypoints away from obstacles.
+5. Avoiding cumulative waypoint drift by always recomputing from a clean base path.
 """
 
 from __future__ import annotations
@@ -35,29 +35,25 @@ if TYPE_CHECKING:
 # Tunable trajectory parameters
 # ---------------------------------------------------------------------
 
-TARGET_SPEED_MPS = 1.35
-MAX_SPEED_MPS = 1.90
-MAX_ACCEL_MPS2 = 5.0
+# Higher = faster trajectory. If the drone starts missing gates, reduce this.
+TARGET_SPEED_MPS = 4.5
+
+# Hard upper bound used when retiming the spline.
+# The controller stretches the trajectory if the spline exceeds this.
+MAX_SPEED_MPS = 5.0
+
+# Hard acceleration limit used when retiming the spline.
+# If the spline asks for too much acceleration, the trajectory is slowed down.
+MAX_ACCEL_MPS2 = 7.0
+
+# Prevents very short waypoint segments from becoming too aggressive.
 MIN_SEGMENT_TIME = 0.20
-RETIMING_SAMPLES = 160
-RETIMING_ITERS = 4
 
+# Number of samples used to estimate max speed and acceleration during retiming.
+RETIMING_SAMPLES = 400
 
-# ---------------------------------------------------------------------
-# Virtual-time governor
-# ---------------------------------------------------------------------
-
-# If tracking error is small, trajectory time advances normally.
-TRACKING_ERROR_SLOWDOWN_START_M = 0.30
-
-# If tracking error reaches this, trajectory time advances slowly.
-TRACKING_ERROR_SLOWDOWN_FULL_M = 0.90
-
-# Minimum fraction of normal trajectory-time speed.
-MIN_TIME_SCALE = 0.35
-
-# After passing the third gate region, be slightly more conservative.
-TAIL_TIME_SCALE = 0.85
+# Number of retiming iterations.
+RETIMING_ITERS = 15
 
 
 # ---------------------------------------------------------------------
@@ -74,15 +70,21 @@ NOMINAL_GATE_POS = np.array(
     dtype=np.float64,
 )
 
-GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 15}
+# Waypoint index corresponding to each gate center.
+GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 11}
 
-# Keep this. Your tests showed changing this globally made things worse.
+# Fly slightly lower than the detected gate center.
+# Set this to 0.0 if you want to aim exactly at the center.
 GATE_Z_OFFSET = -0.10
 
+# Ignore very tiny gate shifts.
 GATE_UPDATE_EPS = 0.01
 
+# Obstacle clearance radius in x-y plane.
+# Actual obstacles may be smaller, but this creates a safety buffer.
 OBSTACLE_CLEARANCE_RADIUS = 0.32
 
+# Do not keep modifying waypoints that are already in the past.
 LOCK_PAST_WAYPOINT_MARGIN_S = 0.15
 
 
@@ -90,6 +92,7 @@ LOCK_PAST_WAYPOINT_MARGIN_S = 0.15
 # Yaw parameters
 # ---------------------------------------------------------------------
 
+# Below this x-y speed, yaw becomes numerically unstable.
 YAW_MIN_SPEED = 0.05
 
 
@@ -109,40 +112,49 @@ NOMINAL_WAYPOINTS = np.array(
         [-0.2, -0.05, 0.60],  # 7
         [-0.6, -0.2, 0.60],  # 8 approach gate 2
         [-1.0, -0.25, 0.70],  # 9 gate 2 center
-        [-1.5, -0.4, 0.70],  # 10
-        [-1.5, -0.5, 1.20],  # 11
-        [-1.0, -0.7, 1.20],  # 12 approach gate 3
-        [-0.5, -0.65, 1.20],  # 13
-        [-0.2, -0.65, 1.20],  # 14
+
+        [-0.5, -0.65, 1.0],  # 13
+
         [0.0, -0.75, 1.20],  # 15 gate 3 center
-        [0.5, -0.75, 1.20],  # 16 end
+        [0.5, -0.75, 1.20],
     ],
     dtype=np.float64,
 )
 
 
 class StateController(Controller):
-    """Adaptive spline state controller with virtual-time slowdown."""
+    """Adaptive state controller following a retimed cubic spline trajectory."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
+        """Initialize the controller.
+
+        Args:
+            obs: Initial environment observation.
+            info: Initial environment info.
+            config: Race/environment configuration.
+        """
         super().__init__(obs, info, config)
 
         self._freq = config.env.freq
 
+        # This is the clean nominal path.
+        # It never accumulates obstacle shifts.
         self._nominal_waypoints = NOMINAL_WAYPOINTS.copy()
+
+        # This version includes gate corrections, but not obstacle shifts.
         self._gate_corrected_waypoints = self._nominal_waypoints.copy()
+
+        # This is the final active path after gate correction and obstacle avoidance.
         self._waypoints = self._gate_corrected_waypoints.copy()
 
+        # Tracks whether a gate has already been updated from observed pose.
         self._gate_updated = [False] * len(NOMINAL_GATE_POS)
 
         self._tick = 0
         self._finished = False
         self._last_yaw = 0.0
 
-        # Virtual trajectory time. This replaces tick/freq for reference progress.
-        self._t_ref = 0.0
-        self._last_time_scale = 1.0
-
+        # Build initial trajectory.
         self._rebuild_spline()
 
     # ------------------------------------------------------------------
@@ -151,18 +163,26 @@ class StateController(Controller):
 
     @staticmethod
     def _wrap_to_pi(angle: float) -> float:
+        """Wrap angle to [-pi, pi]."""
         return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
 
     @staticmethod
     def _closest_angle(angle: float, reference: float) -> float:
+        """Return angle equivalent to angle but closest to reference.
+
+        This avoids sudden jumps from +pi to -pi.
+        """
         return float(reference + ((angle - reference + np.pi) % (2.0 * np.pi) - np.pi))
 
     def _elapsed_time(self) -> float:
-        return min(self._t_ref, self._t_total)
+        """Current controller time in seconds."""
+        return min(self._tick / self._freq, self._t_total)
 
     def _is_waypoint_past(self, wp_idx: int, t_now: float) -> bool:
+        """Check whether a waypoint is already safely in the past."""
         if not hasattr(self, "_t_knots"):
             return False
+
         return self._t_knots[wp_idx] < t_now - LOCK_PAST_WAYPOINT_MARGIN_S
 
     # ------------------------------------------------------------------
@@ -170,6 +190,14 @@ class StateController(Controller):
     # ------------------------------------------------------------------
 
     def _make_time_knots(self, waypoints: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Assign timestamps to waypoints based on distance.
+
+        The original controller spread all waypoints evenly across 15 seconds.
+        That is slow and inconsistent because close segments get too much time
+        and long segments get too little.
+
+        This version gives each segment time proportional to distance.
+        """
         segment_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
 
         segment_times = np.maximum(
@@ -180,8 +208,15 @@ class StateController(Controller):
         return np.concatenate(([0.0], np.cumsum(segment_times)))
 
     def _rebuild_spline(self):
+        """Rebuild the position, velocity, and acceleration splines.
+
+        This is called whenever gate corrections or obstacle avoidance modify
+        the waypoint path.
+        """
         t_knots = self._make_time_knots(self._waypoints)
 
+        # Retiming loop:
+        # Build a spline, check its speed/acceleration, and stretch time if needed.
         for _ in range(RETIMING_ITERS):
             spline = CubicSpline(t_knots, self._waypoints, bc_type="clamped")
 
@@ -205,6 +240,8 @@ class StateController(Controller):
             if scale <= 1.001:
                 break
 
+            # Stretch all times. Velocity scales by 1/scale.
+            # Acceleration scales by 1/scale^2.
             t_knots = t_knots * (scale * 1.02)
 
         self._t_knots = t_knots
@@ -219,6 +256,10 @@ class StateController(Controller):
     # ------------------------------------------------------------------
 
     def _update_gate_waypoints(self, obs: dict) -> bool:
+        """Update gate-center waypoints using observed gate positions.
+
+        This makes the path more accurate when gates are randomized.
+        """
         if "gates_pos" not in obs:
             return False
 
@@ -231,6 +272,7 @@ class StateController(Controller):
         changed = False
 
         for gate_i, wp_i in GATE_WAYPOINT_IDX.items():
+            # Do not change a gate waypoint after it has already been passed.
             if self._is_waypoint_past(wp_i, t_now):
                 continue
 
@@ -239,6 +281,7 @@ class StateController(Controller):
             if not np.all(np.isfinite(observed_pos)):
                 continue
 
+            # Aim slightly below the observed gate center.
             observed_pos[2] += GATE_Z_OFFSET
 
             current_target = self._gate_corrected_waypoints[wp_i]
@@ -260,6 +303,12 @@ class StateController(Controller):
         waypoint: NDArray[np.floating],
         obs_positions: NDArray[np.floating],
     ) -> NDArray[np.floating]:
+        """Push one waypoint away from obstacles in the x-y plane.
+
+        This is intentionally simple. It does not run a full planner.
+        It only makes sure the spline control points do not sit too close
+        to obstacle centers.
+        """
         shifted = waypoint.copy()
 
         for obs_pos in obs_positions:
@@ -271,6 +320,7 @@ class StateController(Controller):
 
             if dist_xy < OBSTACLE_CLEARANCE_RADIUS:
                 if dist_xy < 1e-6:
+                    # If exactly on the obstacle, push in a fixed direction.
                     direction = np.array([1.0, 0.0])
                 else:
                     direction = delta_xy / dist_xy
@@ -280,6 +330,12 @@ class StateController(Controller):
         return shifted
 
     def _update_obstacle_avoidance(self, obs: dict) -> bool:
+        """Recompute obstacle-safe waypoints without cumulative drift.
+
+        Important:
+        This starts from gate-corrected waypoints every time.
+        It does not keep shifting already-shifted waypoints farther and farther.
+        """
         if "obstacles_pos" not in obs:
             return False
 
@@ -295,9 +351,11 @@ class StateController(Controller):
         candidate_waypoints = self._gate_corrected_waypoints.copy()
 
         for wp_i in range(len(candidate_waypoints)):
+            # Keep gate centers fixed. We want to pass through gates accurately.
             if wp_i in GATE_WAYPOINT_IDX.values():
                 continue
 
+            # Avoid changing waypoints that have already been passed.
             if self._is_waypoint_past(wp_i, t_now):
                 candidate_waypoints[wp_i] = self._waypoints[wp_i]
                 continue
@@ -314,46 +372,12 @@ class StateController(Controller):
         return False
 
     def _update_path_from_observation(self, obs: dict):
+        """Update gates and obstacles, then rebuild the spline if needed."""
         gates_changed = self._update_gate_waypoints(obs)
         obstacles_changed = self._update_obstacle_avoidance(obs)
 
         if gates_changed or obstacles_changed:
-            # Preserve current virtual progress fraction after rebuilding.
-            old_t_total = getattr(self, "_t_total", None)
-            old_t_ref = self._t_ref
-
             self._rebuild_spline()
-
-            if old_t_total is not None and old_t_total > 1e-6:
-                frac = np.clip(old_t_ref / old_t_total, 0.0, 1.0)
-                self._t_ref = float(frac * self._t_total)
-
-    # ------------------------------------------------------------------
-    # Virtual-time control
-    # ------------------------------------------------------------------
-
-    def _compute_time_scale(self, obs: dict, des_pos: NDArray[np.floating]) -> float:
-        tracking_error = float(np.linalg.norm(des_pos - obs["pos"]))
-
-        if tracking_error <= TRACKING_ERROR_SLOWDOWN_START_M:
-            scale = 1.0
-        elif tracking_error >= TRACKING_ERROR_SLOWDOWN_FULL_M:
-            scale = MIN_TIME_SCALE
-        else:
-            alpha = (tracking_error - TRACKING_ERROR_SLOWDOWN_START_M) / (
-                TRACKING_ERROR_SLOWDOWN_FULL_M - TRACKING_ERROR_SLOWDOWN_START_M
-            )
-            scale = (1.0 - alpha) + alpha * MIN_TIME_SCALE
-
-        # Be more conservative after gate 2 / before final gate.
-        if hasattr(self, "_t_knots") and self._t_ref >= self._t_knots[9]:
-            scale = min(scale, TAIL_TIME_SCALE)
-
-        # Smooth the time-scale itself to avoid jumps in desired velocity.
-        scale = 0.85 * self._last_time_scale + 0.15 * scale
-        self._last_time_scale = float(scale)
-
-        return float(scale)
 
     # ------------------------------------------------------------------
     # Yaw calculation
@@ -364,6 +388,10 @@ class StateController(Controller):
         des_vel: NDArray[np.floating],
         des_acc: NDArray[np.floating],
     ) -> tuple[float, float]:
+        """Compute desired yaw and yaw-rate from trajectory direction.
+
+        The drone points along the x-y velocity direction.
+        """
         vx, vy = float(des_vel[0]), float(des_vel[1])
         ax, ay = float(des_acc[0]), float(des_acc[1])
 
@@ -373,8 +401,11 @@ class StateController(Controller):
             return self._wrap_to_pi(self._last_yaw), 0.0
 
         raw_yaw = float(np.arctan2(vy, vx))
+
+        # Pick the equivalent yaw angle closest to the previous yaw.
         continuous_yaw = self._closest_angle(raw_yaw, self._last_yaw)
 
+        # d/dt atan2(vy, vx)
         yaw_rate = (vx * ay - vy * ax) / speed_xy_sq
 
         self._last_yaw = continuous_yaw
@@ -390,32 +421,31 @@ class StateController(Controller):
         obs: dict[str, NDArray[np.floating]],
         info: dict | None = None,
     ) -> NDArray[np.floating]:
+        """Compute the desired drone state.
+
+        Returns:
+            [x, y, z,
+             vx, vy, vz,
+             ax, ay, az,
+             yaw,
+             rrate, prate, yrate]
+        """
+        # Update path before computing the desired state.
         self._update_path_from_observation(obs)
 
-        # First sample at current virtual time.
-        t = min(self._t_ref, self._t_total)
+        t = self._elapsed_time()
 
         if t >= self._t_total:
             self._finished = True
 
-        des_pos_base = self._spline(t)
-
-        # Slow reference time if drone is lagging.
-        time_scale = self._compute_time_scale(obs, des_pos_base)
-
-        # Advance virtual trajectory time here, not in step_callback.
-        self._t_ref = min(self._t_ref + time_scale / self._freq, self._t_total)
-        t = min(self._t_ref, self._t_total)
-
         des_pos = self._spline(t)
-
-        # Time-warped derivatives. This keeps desired velocity/acceleration consistent
-        # with the slowed virtual progress.
-        des_vel = self._vel_spline(t) * time_scale
-        des_acc = self._acc_spline(t) * (time_scale * time_scale)
+        des_vel = self._vel_spline(t)
+        des_acc = self._acc_spline(t)
 
         des_yaw, des_yaw_rate = self._compute_yaw_and_rate(des_vel, des_acc)
 
+        # Roll-rate and pitch-rate are left as zero.
+        # Yaw-rate is provided as feed-forward.
         action = np.concatenate(
             (
                 des_pos,
@@ -438,16 +468,15 @@ class StateController(Controller):
         truncated: bool,
         info: dict,
     ) -> bool:
+        """Advance internal time after each simulation step."""
         self._tick += 1
         return self._finished
 
     def episode_callback(self):
+        """Reset controller state at the beginning of a new episode."""
         self._tick = 0
         self._finished = False
         self._last_yaw = 0.0
-
-        self._t_ref = 0.0
-        self._last_time_scale = 1.0
 
         self._gate_updated = [False] * len(NOMINAL_GATE_POS)
 
@@ -457,6 +486,7 @@ class StateController(Controller):
         self._rebuild_spline()
 
     def render_callback(self, sim: "Sim"):
+        """Visualize the remaining trajectory and current setpoint."""
         if not HAS_VIZ:
             return
 
