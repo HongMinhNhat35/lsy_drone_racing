@@ -71,7 +71,7 @@ NOMINAL_GATE_POS = np.array(
 )
 
 # Waypoint index corresponding to each gate center.
-GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 11}
+GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 12}
 
 # Fly slightly lower than the detected gate center.
 # Set this to 0.0 if you want to aim exactly at the center.
@@ -106,7 +106,8 @@ NOMINAL_WAYPOINTS = np.array(
         [-1.0, 0.55, 0.40],  # 1
         [0.0, 0.45, 0.70],  # 2 approach gate 0
         [0.5, 0.25, 0.70],  # 3 gate 0 center
-        [1.3, -0.15, 0.90],  # 4 approach gate 1
+        [0.0, 0.45, 0.70],
+        [0.85, 0.80, 0.90],  # 4 approach gate 1
         [1.05, 0.75, 1.20],  # 5 gate 1 center
         [0.65, 1.0, 1.20],  # 6
         [-0.2, -0.05, 0.60],  # 7

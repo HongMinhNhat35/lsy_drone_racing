@@ -58,11 +58,11 @@ class Args:
     # Algorithm specific arguments
     total_timesteps: int = 1_500_000
     """total timesteps of the experiments"""
-    learning_rate: float = 1.5e-3
+    learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1024
+    num_envs: int = 512
     """the number of parallel game environments"""
-    num_steps: int = 8
+    num_steps: int = 32
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -467,7 +467,7 @@ def set_seeds(seed: int):
 
 # region MakeEnvs
 def make_envs(
-    config: str = "level0.toml",
+    config: str = "level2.toml",
     num_envs: int = None,
     jax_device: str = "cpu",
     torch_device: torch.device = torch.device("cpu"),

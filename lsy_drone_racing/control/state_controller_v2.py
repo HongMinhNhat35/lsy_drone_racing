@@ -36,15 +36,15 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------
 
 # Higher = faster trajectory. If the drone starts missing gates, reduce this.
-TARGET_SPEED_MPS = 4.5
+TARGET_SPEED_MPS = 4.7
 
 # Hard upper bound used when retiming the spline.
 # The controller stretches the trajectory if the spline exceeds this.
-MAX_SPEED_MPS = 5.0
+MAX_SPEED_MPS = 5.3
 
 # Hard acceleration limit used when retiming the spline.
 # If the spline asks for too much acceleration, the trajectory is slowed down.
-MAX_ACCEL_MPS2 = 7.0
+MAX_ACCEL_MPS2 = 8.0
 
 # Prevents very short waypoint segments from becoming too aggressive.
 MIN_SEGMENT_TIME = 0.20
@@ -53,7 +53,7 @@ MIN_SEGMENT_TIME = 0.20
 RETIMING_SAMPLES = 400
 
 # Number of retiming iterations.
-RETIMING_ITERS = 15
+RETIMING_ITERS = 16
 
 
 # ---------------------------------------------------------------------
@@ -106,14 +106,14 @@ NOMINAL_WAYPOINTS = np.array(
         [-1.0, 0.55, 0.40],  # 1
         [0.0, 0.45, 0.70],  # 2 approach gate 0
         [0.5, 0.25, 0.70],  # 3 gate 0 center
-        [1.3, -0.15, 0.90],  # 4 approach gate 1
+        [1.0, -0.15, 0.90],  # 4 approach gate 1
         [1.05, 0.75, 1.20],  # 5 gate 1 center
-        [0.65, 1.0, 1.20],  # 6
+        [0.65, 0.90, 1.20],  # 6
         [-0.2, -0.05, 0.60],  # 7
-        [-0.6, -0.2, 0.60],  # 8 approach gate 2
+        [-0.6, -0.1, 0.60],  # 8 approach gate 2
         [-1.0, -0.25, 0.70],  # 9 gate 2 center
 
-        [-0.5, -0.65, 1.0],  # 13
+        [-0.45, -0.85, 1.0],  # 13
 
         [0.0, -0.75, 1.20],  # 15 gate 3 center
         [0.5, -0.75, 1.20],  # 16 end
