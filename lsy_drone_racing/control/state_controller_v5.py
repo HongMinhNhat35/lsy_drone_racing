@@ -35,19 +35,16 @@ if TYPE_CHECKING:
 # Tunable trajectory parameters
 # ---------------------------------------------------------------------
 
-# Higher = faster trajectory. If the drone starts missing gates, reduce this.
-TARGET_SPEED_MPS = 4.5
+TARGET_SPEED_MPS = 5.8
+MAX_SPEED_MPS = 7.0
+MAX_ACCEL_MPS2 = 16.0
 
-# Hard upper bound used when retiming the spline.
-# The controller stretches the trajectory if the spline exceeds this.
-MAX_SPEED_MPS = 6.0
+MIN_SEGMENT_TIME = 0.10
 
-# Hard acceleration limit used when retiming the spline.
-# If the spline asks for too much acceleration, the trajectory is slowed down.
-MAX_ACCEL_MPS2 = 7.0
-
-# Prevents very short waypoint segments from becoming too aggressive.
-MIN_SEGMENT_TIME = 0.20
+# Extra corner aggression
+CORNER_FAST_ANGLE_DEG = 35.0
+CORNER_TIME_SCALE = 0.65
+CORNER_MIN_SEGMENT_TIME = 0.075
 
 # Number of samples used to estimate max speed and acceleration during retiming.
 RETIMING_SAMPLES = 400
@@ -77,12 +74,12 @@ GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 11}
 # Set this to 0.0 if you want to aim exactly at the center.
 GATE_Z_OFFSET = -0.10
 
-# Ignore very tiny gate shifts
+# Ignore very tiny gate shifts.
 GATE_UPDATE_EPS = 0.01
 
 # Obstacle clearance radius in x-y plane.
 # Actual obstacles may be smaller, but this creates a safety buffer.
-OBSTACLE_CLEARANCE_RADIUS = 0.35
+OBSTACLE_CLEARANCE_RADIUS = 0.32
 
 # Do not keep modifying waypoints that are already in the past.
 LOCK_PAST_WAYPOINT_MARGIN_S = 0.15
@@ -96,9 +93,9 @@ LOCK_PAST_WAYPOINT_MARGIN_S = 0.15
 YAW_MIN_SPEED = 0.05
 
 
-# --------------------------------------
+# ---------------------------------------------------------------------
 # Nominal path
-# --------------------------------------------------------
+# ---------------------------------------------------------------------
 
 NOMINAL_WAYPOINTS = np.array(
     [
@@ -106,11 +103,10 @@ NOMINAL_WAYPOINTS = np.array(
         [-1.0, 0.55, 0.40],  # 1
         [0.0, 0.25, 0.70],  # 2 approach gate 0
         [0.55, 0.20, 0.70],  # 3 gate 0 center
-        # [1.15, 0.0, 0.70],
-        [1.4, 0.1, 0.90],  # 4 approach gate 1
+        [1.5, 0.20, 0.90],  # 4 approach gate 1
         [1.1, 0.78, 1.20],  # 5 gate 1 center
-        [0.40, 0.75, 1.20],  # 6
-        [-0.15, 0.0, 0.60],  # `7
+        [0.50, 0.75, 1.20],  # 6
+        [-0.2, -0.05, 0.60],  # 7
         [-0.6, -0.2, 0.60],  # 8 approach gate 2
         [-1.0, -0.25, 0.70],   # 9 gate 2 center
 
@@ -191,67 +187,45 @@ class StateController(Controller):
     # ------------------------------------------------------------------
 
     def _make_time_knots(self, waypoints: NDArray[np.floating]) -> NDArray[np.floating]:
-        """Assign timestamps to waypoints based on distance.
-
-        The original controller spread all waypoints evenly across 15 seconds.
-        That is slow and inconsistent because close segments get too much time
-        and long segments get too little.
-
-        This version gives each segment time proportional to distance.
-        """
-        segment_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
+    
+        segment_vectors = np.diff(waypoints, axis=0)
+        segment_lengths = np.linalg.norm(segment_vectors, axis=1)
 
         segment_times = np.maximum(
             segment_lengths / TARGET_SPEED_MPS,
             MIN_SEGMENT_TIME,
         )
 
+        corner_angle_threshold = np.deg2rad(CORNER_FAST_ANGLE_DEG)
+
+        for i in range(1, len(waypoints) - 1):
+            v_prev = waypoints[i] - waypoints[i - 1]
+            v_next = waypoints[i + 1] - waypoints[i]
+
+            n_prev = np.linalg.norm(v_prev)
+            n_next = np.linalg.norm(v_next)
+
+            if n_prev < 1e-6 or n_next < 1e-6:
+                continue
+
+            cos_angle = np.dot(v_prev, v_next) / (n_prev * n_next)
+            cos_angle = np.clip(cos_angle, -1.0, 1.0)
+
+            # 0 = straight, larger = sharper turn
+            turn_angle = np.arccos(cos_angle)
+
+            if turn_angle > corner_angle_threshold:
+                # Speed up both the segment entering and leaving the corner.
+                segment_times[i - 1] = max(
+                    segment_times[i - 1] * CORNER_TIME_SCALE,
+                    CORNER_MIN_SEGMENT_TIME,
+                )
+                segment_times[i] = max(
+                    segment_times[i] * CORNER_TIME_SCALE,
+                    CORNER_MIN_SEGMENT_TIME,
+                )
+
         return np.concatenate(([0.0], np.cumsum(segment_times)))
-
-    def _rebuild_spline(self):
-        """Rebuild the position, velocity, and acceleration splines.
-
-        This is called whenever gate corrections or obstacle avoidance modify
-        the waypoint path.
-        """
-        t_knots = self._make_time_knots(self._waypoints)
-
-        # Retiming loop:
-        # Build a spline, check its speed/acceleration, and stretch time if needed.
-        for _ in range(RETIMING_ITERS):
-            spline = CubicSpline(t_knots, self._waypoints, bc_type="clamped")
-
-            t_samples = np.linspace(t_knots[0], t_knots[-1], RETIMING_SAMPLES)
-
-            vel = spline.derivative(1)(t_samples)
-            acc = spline.derivative(2)(t_samples)
-
-            max_speed = float(np.max(np.linalg.norm(vel, axis=1)))
-            max_accel = float(np.max(np.linalg.norm(acc, axis=1)))
-
-            speed_scale = max_speed / MAX_SPEED_MPS if max_speed > MAX_SPEED_MPS else 1.0
-            accel_scale = (
-                np.sqrt(max_accel / MAX_ACCEL_MPS2)
-                if max_accel > MAX_ACCEL_MPS2
-                else 1.0
-            )
-
-            scale = max(speed_scale, accel_scale)
-
-            if scale <= 1.001:
-                break
-
-            # Stretch all times. Velocity scales by 1/scale.
-            # Acceleration scales by 1/scale^2.
-            t_knots = t_knots * (scale * 1.02)
-
-        self._t_knots = t_knots
-        self._t_total = float(t_knots[-1])
-
-        self._spline = CubicSpline(self._t_knots, self._waypoints, bc_type="clamped")
-        self._vel_spline = self._spline.derivative(1)
-        self._acc_spline = self._spline.derivative(2)
-
     # ------------------------------------------------------------------
     # Gate correction
     # ------------------------------------------------------------------
