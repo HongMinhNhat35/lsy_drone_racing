@@ -44,7 +44,7 @@ MAX_SPEED_MPS = 6.0
 
 # Hard acceleration limit used when retiming the spline.
 # If the spline asks for too much acceleration, the trajectory is slowed down.
-MAX_ACCEL_MPS2 = 8.0
+MAX_ACCEL_MPS2 = 7.0
 
 # Prevents very short waypoint segments from becoming too aggressive.
 MIN_SEGMENT_TIME = 0.20
@@ -82,7 +82,7 @@ GATE_UPDATE_EPS = 0.01
 
 # Obstacle clearance radius in x-y plane.
 # Actual obstacles may be smaller, but this creates a safety buffer.
-OBSTACLE_CLEARANCE_RADIUS = 0.7
+OBSTACLE_CLEARANCE_RADIUS = 0.5
 
 # Do not keep modifying waypoints that are already in the past.
 LOCK_PAST_WAYPOINT_MARGIN_S = 0.15
