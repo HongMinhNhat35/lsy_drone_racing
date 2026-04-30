@@ -82,7 +82,7 @@ GATE_UPDATE_EPS = 0.01
 
 # Obstacle clearance radius in x-y plane.
 # Actual obstacles may be smaller, but this creates a safety buffer.
-OBSTACLE_CLEARANCE_RADIUS = 0.32
+OBSTACLE_CLEARANCE_RADIUS = 0.7
 
 # Do not keep modifying waypoints that are already in the past.
 LOCK_PAST_WAYPOINT_MARGIN_S = 0.15
