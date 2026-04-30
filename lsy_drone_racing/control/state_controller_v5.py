@@ -77,7 +77,7 @@ GATE_WAYPOINT_IDX = {0: 3, 1: 5, 2: 9, 3: 11}
 # Set this to 0.0 if you want to aim exactly at the center.
 GATE_Z_OFFSET = -0.10
 
-# Ignore very tiny gate shifts.
+# Ignore very tiny gate shifts
 GATE_UPDATE_EPS = 0.01
 
 # Obstacle clearance radius in x-y plane.
